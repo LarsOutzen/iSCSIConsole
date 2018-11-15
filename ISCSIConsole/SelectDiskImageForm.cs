@@ -35,7 +35,7 @@ namespace ISCSIConsole
             DiskImage diskImage;
             try
             {
-                diskImage = DiskImage.GetDiskImage(path);
+                diskImage = DiskImage.GetDiskImage(path, chkReadOnly.Checked);
             }
             catch (IOException ex)
             {
@@ -52,6 +52,7 @@ namespace ISCSIConsole
                 MessageBox.Show("Unsupported Disk Image Format", "Error");
                 return;
             }
+
             bool isLocked = false;
             try
             {

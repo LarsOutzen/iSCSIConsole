@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
+/* Copyright (C) 2014-2018 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
  * 
  * You can redistribute this program and/or modify it under the terms of
  * the GNU Lesser Public License as published by the Free Software Foundation,
@@ -7,7 +7,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
 using Utilities;
 
 namespace DiskAccessLibrary.FileSystems.NTFS
@@ -16,48 +15,47 @@ namespace DiskAccessLibrary.FileSystems.NTFS
     {
         public const int BytesPerStride = 512;
 
-        public static void DecodeSegmentBuffer(byte[] buffer, int offset, ushort updateSequenceNumber, List<byte[]> updateSequenceReplacementData)
+        /// <remarks>
+        /// The USN will be written at the end of each 512-byte stride, even if the device has more (or less) than 512 bytes per sector.
+        /// https://docs.microsoft.com/en-us/windows/desktop/DevNotes/multi-sector-header
+        /// </remarks>
+        public static void RevertUsaProtection(byte[] buffer, int offset)
         {
-            // The USN will be written at the end of each 512-byte stride, even if the device has more (or less) than 512 bytes per sector.
-            // http://msdn.microsoft.com/en-us/library/bb470212%28v=vs.85%29.aspx
-            
+            MultiSectorHeader multiSectorHeader = new MultiSectorHeader(buffer, offset + 0x00);
+            int position = offset + multiSectorHeader.UpdateSequenceArrayOffset;
+            uint updateSequenceNumber = LittleEndianReader.ReadUInt16(buffer, ref position);
+
             // First do validation check - make sure the USN matches on all sectors)
-            for (int i = 0; i < updateSequenceReplacementData.Count; ++i)
+            for (int index = 0; index < multiSectorHeader.UpdateSequenceArraySize - 1; ++index)
             {
-                if (updateSequenceNumber != LittleEndianConverter.ToUInt16(buffer, offset + (BytesPerStride * (i + 1)) - 2))
+                if (updateSequenceNumber != LittleEndianConverter.ToUInt16(buffer, offset + (BytesPerStride * (index + 1)) - 2))
                 {
-                    throw new InvalidDataException("Corrupt file system record found");
+                    throw new InvalidDataException("Corrupt multi-sector transfer, USN does not match MultiSectorHeader");
                 }
             }
 
-            // Now replace the USNs with the actual data from the UpdateSequenceReplacementData array
-            for (int i = 0; i < updateSequenceReplacementData.Count; ++i)
+            for (int index = 0; index < multiSectorHeader.UpdateSequenceArraySize - 1; index++)
             {
-                Array.Copy(updateSequenceReplacementData[i], 0, buffer, offset + (BytesPerStride * (i + 1)) - 2, 2);
+                byte[] endOfSectorBytes = ByteReader.ReadBytes(buffer, ref position, 2);
+                ByteWriter.WriteBytes(buffer, offset + (BytesPerStride * (index + 1)) - 2, endOfSectorBytes);
             }
         }
 
-        public static List<byte[]> EncodeSegmentBuffer(byte[] buffer, int offset, int segmentLength, ushort updateSequenceNumber)
+        public static void ApplyUsaProtection(byte[] buffer, int offset)
         {
-            int numberOfStrides = segmentLength / BytesPerStride;
-            List<byte[]> updateSequenceReplacementData = new List<byte[]>();
+            MultiSectorHeader multiSectorHeader = new MultiSectorHeader(buffer, offset + 0x00);
+            int position = offset + multiSectorHeader.UpdateSequenceArrayOffset;
+            ushort updateSequenceNumber = LittleEndianReader.ReadUInt16(buffer, ref position);
 
-            // Read in the bytes that are replaced by the USN
-            for (int i = 0; i < numberOfStrides; i++)
+            for (int index = 0; index < multiSectorHeader.UpdateSequenceArraySize - 1; index++)
             {
-                byte[] endOfSectorBytes = new byte[2];
-                endOfSectorBytes[0] = buffer[offset + (BytesPerStride * (i + 1)) - 2];
-                endOfSectorBytes[1] = buffer[offset + (BytesPerStride * (i + 1)) - 2];
-                updateSequenceReplacementData.Add(endOfSectorBytes);
+                // Read in the bytes that are replaced by the USN
+                byte[] endOfSectorBytes = ByteReader.ReadBytes(buffer, offset + (BytesPerStride * (index + 1)) - 2, 2);
+                // Relocate the bytes that are replaced by the USN
+                ByteWriter.WriteBytes(buffer, ref position, endOfSectorBytes);
+                // Write the USN
+                LittleEndianWriter.WriteUInt16(buffer, offset + (BytesPerStride * (index + 1)) - 2, updateSequenceNumber);
             }
-
-            // Overwrite the bytes that are replaced with the USN
-            for (int i = 0; i < updateSequenceReplacementData.Count; i++)
-            {
-                LittleEndianWriter.WriteUInt16(buffer, offset + (BytesPerStride * (i + 1)) - 2, updateSequenceNumber);
-            }
-
-            return updateSequenceReplacementData;
         }
     }
 }
